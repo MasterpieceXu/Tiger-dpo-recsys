@@ -2,7 +2,7 @@
 Configuration file for MovieLens-32M Generative Recommendation System
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from typing import List, Optional
 
 @dataclass
@@ -66,10 +66,10 @@ class EvalConfig:
 @dataclass
 class Config:
     """Main configuration"""
-    data: DataConfig = DataConfig()
-    rqvae: RQVAEConfig = RQVAEConfig()
-    tiger: TIGERConfig = TIGERConfig()
-    eval: EvalConfig = EvalConfig()
+    data: DataConfig = field(default_factory=DataConfig)
+    rqvae: RQVAEConfig = field(default_factory=RQVAEConfig)
+    tiger: TIGERConfig = field(default_factory=TIGERConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
     
     # Paths
     output_dir: str = "outputs"

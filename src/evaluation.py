@@ -154,38 +154,38 @@ class RecommendationEvaluator:
         logger.info(f"Loaded test data for {len(test_sequences)} users")
         return test_sequences
     
-    def load_semantic_id_mapping(self, data_dir: str) -> Dict[int, int]:
-        """Load semantic ID to movie ID mapping"""
+    def load_semantic_id_mapping(self, data_dir: str) -> Dict[Tuple[int, ...], int]:
+        """Load semantic ID sequence (tuple) to movie ID mapping"""
         semantic_ids_path = os.path.join(data_dir, "item_semantic_ids.jsonl")
-        semantic_to_movie = {}
+        semantic_to_movie: Dict[Tuple[int, ...], int] = {}
         
         with open(semantic_ids_path, 'r') as f:
             for line in f:
                 item = json.loads(line)
                 movie_id = item['movieId']
-                for i, semantic_id in enumerate(item['semantic_ids']):
-                    semantic_to_movie[semantic_id] = movie_id
+                # 使用完整的语义 ID 序列作为 key，例如 (a, b)
+                semantic_ids = tuple(item['semantic_ids'])
+                semantic_to_movie[semantic_ids] = movie_id
         
         return semantic_to_movie
     
     def convert_semantic_to_movie_ids(self, semantic_recommendations: List[List[int]], 
-                                    semantic_to_movie: Dict[int, int]) -> List[List[int]]:
+                                    semantic_to_movie: Dict[Tuple[int, ...], int]) -> List[List[int]]:
         """Convert semantic IDs to movie IDs"""
         movie_recommendations = []
         
-        for user_recs in semantic_recommendations:
-            movie_recs = []
-            for semantic_id in user_recs:
-                if semantic_id in semantic_to_movie:
-                    movie_id = semantic_to_movie[semantic_id]
-                    if movie_id not in movie_recs:  # Avoid duplicates
-                        movie_recs.append(movie_id)
+        for semantic_ids in semantic_recommendations:
+            movie_recs: List[int] = []
+            key = tuple(semantic_ids)
+            if key in semantic_to_movie:
+                movie_id = semantic_to_movie[key]
+                movie_recs.append(movie_id)
             movie_recommendations.append(movie_recs)
         
         return movie_recommendations
     
     def evaluate_tiger_model(self, model_path: str, test_sequences: Dict[int, List[str]], 
-                           semantic_to_movie: Dict[int, int], k_values: List[int]) -> Dict[str, float]:
+                           semantic_to_movie: Dict[Tuple[int, ...], int], k_values: List[int]) -> Dict[str, float]:
         """Evaluate TIGER model"""
         logger.info("Evaluating TIGER model...")
         
@@ -201,9 +201,12 @@ class RecommendationEvaluator:
             if len(sequence) < 2:
                 continue
             
-            # Use all but last item as input
-            input_sequence = sequence[:-1]
-            true_next_items = [sequence[-1]]  # Last item as ground truth
+            # 使用除最后一部电影外的历史作为输入：这里假设每部电影由两个语义 token 表示
+            if len(sequence) < 4:
+                # 序列太短，无法构成至少 1 部电影历史 + 1 部电影目标
+                continue
+            input_sequence = sequence[:-2]
+            last_tokens = sequence[-2:]
             
             # Generate recommendations
             try:
@@ -216,21 +219,27 @@ class RecommendationEvaluator:
                 # Convert to movie IDs
                 movie_recs = []
                 for semantic_rec in semantic_recs:
-                    for semantic_id in semantic_rec:
-                        if semantic_id in semantic_to_movie:
-                            movie_id = semantic_to_movie[semantic_id]
-                            if movie_id not in movie_recs:
-                                movie_recs.append(movie_id)
+                    key = tuple(semantic_rec)
+                    if key in semantic_to_movie:
+                        movie_id = semantic_to_movie[key]
+                        if movie_id not in movie_recs:
+                            movie_recs.append(movie_id)
                 
                 predictions.append(movie_recs[:max(k_values)])
                 
                 # Convert ground truth
                 true_movie_ids = []
-                for token in true_next_items:
+                semantic_ids: List[int] = []
+                for token in last_tokens:
                     if token.startswith('<id_') and token.endswith('>'):
-                        semantic_id = int(token[4:-1])
-                        if semantic_id in semantic_to_movie:
-                            true_movie_ids.append(semantic_to_movie[semantic_id])
+                        try:
+                            semantic_ids.append(int(token[4:-1]))
+                        except ValueError:
+                            continue
+                if semantic_ids:
+                    key = tuple(semantic_ids)
+                    if key in semantic_to_movie:
+                        true_movie_ids.append(semantic_to_movie[key])
                 
                 ground_truth.append(true_movie_ids)
                 
@@ -246,7 +255,7 @@ class RecommendationEvaluator:
         return metrics
     
     def evaluate_baselines(self, ratings_df: pd.DataFrame, test_sequences: Dict[int, List[str]], 
-                          semantic_to_movie: Dict[int, int], k_values: List[int]) -> Dict[str, Dict[str, float]]:
+                          semantic_to_movie: Dict[Tuple[int, ...], int], k_values: List[int]) -> Dict[str, Dict[str, float]]:
         """Evaluate baseline models"""
         logger.info("Evaluating baseline models...")
         
@@ -265,11 +274,19 @@ class RecommendationEvaluator:
             
             # Convert ground truth
             true_movie_ids = []
-            for token in sequence[-1:]:  # Last item as ground truth
-                if token.startswith('<id_') and token.endswith('>'):
-                    semantic_id = int(token[4:-1])
-                    if semantic_id in semantic_to_movie:
-                        true_movie_ids.append(semantic_to_movie[semantic_id])
+            if len(sequence) >= 2:
+                last_tokens = sequence[-2:]
+                semantic_ids: List[int] = []
+                for token in last_tokens:
+                    if token.startswith('<id_') and token.endswith('>'):
+                        try:
+                            semantic_ids.append(int(token[4:-1]))
+                        except ValueError:
+                            continue
+                if semantic_ids:
+                    key = tuple(semantic_ids)
+                    if key in semantic_to_movie:
+                        true_movie_ids.append(semantic_to_movie[key])
             
             ground_truth.append(true_movie_ids)
         

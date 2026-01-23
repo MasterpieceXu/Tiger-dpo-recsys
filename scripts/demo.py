@@ -55,9 +55,8 @@ class RecommendationDemo:
                 movie_id = item['movieId']
                 semantic_ids = item['semantic_ids']
                 
-                # Map each semantic ID to movie ID
-                for semantic_id in semantic_ids:
-                    self.semantic_to_movie[semantic_id] = movie_id
+                # 使用完整的语义 ID 序列作为 key，例如 (a, b)
+                self.semantic_to_movie[tuple(semantic_ids)] = movie_id
                 
                 # Map movie ID to semantic IDs
                 self.movie_to_semantic[movie_id] = semantic_ids
@@ -89,16 +88,18 @@ class RecommendationDemo:
     def semantic_tokens_to_movie_ids(self, semantic_tokens: List[str]) -> List[int]:
         """Convert semantic tokens to movie IDs"""
         movie_ids = []
+        semantic_ids = []
         for token in semantic_tokens:
             if token.startswith('<id_') and token.endswith('>'):
                 try:
-                    semantic_id = int(token[4:-1])
-                    if semantic_id in self.semantic_to_movie:
-                        movie_id = self.semantic_to_movie[semantic_id]
-                        if movie_id not in movie_ids:  # Avoid duplicates
-                            movie_ids.append(movie_id)
+                    semantic_ids.append(int(token[4:-1]))
                 except ValueError:
                     continue
+        if semantic_ids:
+            key = tuple(semantic_ids)
+            if key in self.semantic_to_movie:
+                movie_id = self.semantic_to_movie[key]
+                movie_ids.append(movie_id)
         return movie_ids
     
     def recommend_for_user_history(self, movie_ids: List[int], num_recommendations: int = 10) -> Dict:
