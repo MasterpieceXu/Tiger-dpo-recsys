@@ -1,28 +1,42 @@
 """
-Configuration file for MovieLens-32M Generative Recommendation System
+Configuration file for the MovieLens-32M generative recommendation system.
+
+The single :class:`Config` dataclass owns every knob the pipeline cares about.
+For Colab / local trade-offs, use :func:`apply_preset` (or set the
+``GR_PRESET`` environment variable) to flip between a handful of well-tested
+defaults instead of editing fields by hand.
 """
+
+from __future__ import annotations
+
 import os
-from dataclasses import dataclass,field
+from dataclasses import dataclass, field
 from typing import List, Optional
+
+# Re-exported so callers can build a DPOConfig without reaching into src/.
+from src.dpo import DPOConfig as _DPOAlgoConfig
+
 
 @dataclass
 class DataConfig:
-    """Data configuration"""
     data_dir: str = "dataset/ml-32m"
     ratings_file: str = "ratings.csv"
     movies_file: str = "movies.csv"
-    min_rating: float = 4.0  # Minimum rating for positive samples
-    max_seq_length: int = 50  # Maximum sequence length per user
-    min_interactions: int = 5  # Minimum interactions per user
-    test_ratio: float = 0.2  # Test set ratio
-    val_ratio: float = 0.1   # Validation set ratio
+    min_rating: float = 4.0          # ratings >= this are positive
+    max_seq_length: int = 50         # max user history per sample
+    min_interactions: int = 5
+    test_ratio: float = 0.2
+    val_ratio: float = 0.1
+    # Subsample top-N most active users (None = use all). Useful for
+    # Colab-friendly presets that don't want to chew through 200k users.
+    max_users: Optional[int] = None
+
 
 @dataclass
 class RQVAEConfig:
-    """RQ-VAE configuration"""
     vocab_size: int = 16384
-    levels: int = 2  # Number of quantization levels
-    dim: int = 256   # Embedding dimension
+    levels: int = 2
+    dim: int = 256
     hidden_dim: int = 512
     num_layers: int = 4
     dropout: float = 0.1
@@ -32,9 +46,9 @@ class RQVAEConfig:
     learning_rate: float = 1e-3
     warmup_steps: int = 1000
 
+
 @dataclass
 class TIGERConfig:
-    """TIGER model configuration"""
     model_name: str = "t5-small"
     max_length: int = 512
     num_train_epochs: int = 5
@@ -50,38 +64,147 @@ class TIGERConfig:
     fp16: bool = True
     dataloader_num_workers: int = 4
 
+
+@dataclass
+class DPOConfig:
+    """OneRec-lite DPO settings (kept separate from the algorithm-level config)."""
+
+    enabled: bool = True
+    beta: float = 0.1
+    learning_rate: float = 1e-6
+    weight_decay: float = 0.0
+    num_epochs: int = 2
+    batch_size: int = 8
+    grad_clip: float = 1.0
+    log_every: int = 25
+    # Knobs for ``PreferenceDataBuilder``.
+    num_beams_for_pairs: int = 20
+    num_candidates_for_pairs: int = 10
+
+
 @dataclass
 class EvalConfig:
-    """Evaluation configuration"""
-    recall_k: List[int] = None
-    ndcg_k: List[int] = None
+    recall_k: List[int] = field(default_factory=lambda: [10, 20, 50])
+    ndcg_k: List[int] = field(default_factory=lambda: [10, 20, 50])
     num_candidates: int = 1000
-    
-    def __post_init__(self):
-        if self.recall_k is None:
-            self.recall_k = [10, 20, 50]
-        if self.ndcg_k is None:
-            self.ndcg_k = [10, 20, 50]
+    # Cap test users to keep evaluation under control on big datasets.
+    max_test_users: Optional[int] = 5000
+    # ItemKNN: only keep top-N nearest neighbors per item to avoid an O(I^2)
+    # similarity matrix (~39 GB on ml-32m).
+    knn_top_n: int = 50
+
 
 @dataclass
 class Config:
-    """Main configuration"""
     data: DataConfig = field(default_factory=DataConfig)
     rqvae: RQVAEConfig = field(default_factory=RQVAEConfig)
     tiger: TIGERConfig = field(default_factory=TIGERConfig)
+    dpo: DPOConfig = field(default_factory=DPOConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
-    
-    # Paths
+
     output_dir: str = "outputs"
     model_dir: str = "models"
     log_dir: str = "logs"
-    
-    # Device
+
     device: str = "cuda"
     seed: int = 42
-    
-    def __post_init__(self):
-        # Create directories
+
+    preset: str = "default"
+
+    def __post_init__(self) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.model_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
+
+        env_preset = os.environ.get("GR_PRESET")
+        if env_preset:
+            apply_preset(self, env_preset)
+
+    # ---- helpers ---------------------------------------------------------
+
+    def to_dpo_config(self) -> _DPOAlgoConfig:
+        """Convert the user-facing :class:`DPOConfig` into the algorithm-level
+        :class:`src.dpo.DPOConfig` consumed by :class:`src.dpo.DPOTrainer`."""
+        return _DPOAlgoConfig(
+            beta=self.dpo.beta,
+            learning_rate=self.dpo.learning_rate,
+            weight_decay=self.dpo.weight_decay,
+            num_epochs=self.dpo.num_epochs,
+            batch_size=self.dpo.batch_size,
+            grad_clip=self.dpo.grad_clip,
+            log_every=self.dpo.log_every,
+            metrics_path=os.path.join(self.output_dir, "dpo_metrics.json"),
+            save_dir=os.path.join(self.model_dir, "onerec_lite_dpo"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+
+def apply_preset(cfg: Config, name: str) -> Config:
+    """Mutate ``cfg`` in-place to match a named preset and return it.
+
+    Available presets:
+
+    * ``default``         – original paper-ish settings (full ml-32m).
+    * ``local_smoke``     – tiny subset, runs in <30 min on CPU. Numbers are
+                            meaningless – use this only to validate code paths.
+    * ``free_colab_safe`` – fits on a Colab free T4 (16 GB) and finishes in
+                            ~3-4 hours.
+    * ``pro_colab_full``  – full ml-32m on Colab Pro (T4 / V100), ~8-10 hours.
+    """
+    name = name.lower()
+    cfg.preset = name
+
+    if name == "default":
+        return cfg
+
+    if name == "local_smoke":
+        cfg.data.max_users = 5_000
+        cfg.data.max_seq_length = 30
+        cfg.rqvae.epochs = 3
+        cfg.rqvae.batch_size = 64
+        cfg.tiger.num_train_epochs = 1
+        cfg.tiger.per_device_train_batch_size = 8
+        cfg.tiger.gradient_accumulation_steps = 1
+        cfg.tiger.max_length = 256
+        cfg.tiger.eval_steps = 50
+        cfg.tiger.save_steps = 200
+        cfg.tiger.dataloader_num_workers = 0
+        cfg.tiger.fp16 = False
+        cfg.dpo.num_epochs = 1
+        cfg.dpo.batch_size = 4
+        cfg.eval.max_test_users = 500
+        return cfg
+
+    if name == "free_colab_safe":
+        cfg.data.max_users = 150_000
+        cfg.rqvae.epochs = 30
+        cfg.tiger.num_train_epochs = 3
+        cfg.tiger.per_device_train_batch_size = 16
+        cfg.tiger.gradient_accumulation_steps = 2
+        cfg.tiger.max_length = 384
+        cfg.tiger.dataloader_num_workers = 2
+        cfg.dpo.num_epochs = 2
+        cfg.dpo.batch_size = 8
+        cfg.eval.max_test_users = 5_000
+        return cfg
+
+    if name == "pro_colab_full":
+        cfg.data.max_users = None  # full dataset
+        cfg.rqvae.epochs = 50
+        cfg.tiger.num_train_epochs = 5
+        cfg.tiger.per_device_train_batch_size = 24
+        cfg.tiger.gradient_accumulation_steps = 2
+        cfg.tiger.max_length = 512
+        cfg.tiger.dataloader_num_workers = 4
+        cfg.dpo.num_epochs = 3
+        cfg.dpo.batch_size = 8
+        cfg.eval.max_test_users = 10_000
+        return cfg
+
+    raise ValueError(
+        f"Unknown preset {name!r}. Choose from: default, local_smoke, "
+        "free_colab_safe, pro_colab_full"
+    )
