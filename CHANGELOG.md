@@ -4,6 +4,26 @@ This file documents the work done on top of the upstream
 [`xkx-youcha/GR-movie-recommendation`](https://github.com/xkx-youcha/GR-movie-recommendation)
 when building **Tiger-DPO-RecSys**.
 
+## v0.3 — Cloud-only
+
+Decided to run training exclusively on Colab. Removed local-Windows-GPU
+plumbing so that the repo doesn't ship instructions / presets nobody
+maintains.
+
+### Removed
+
+- `scripts/activate_venv.ps1` (PowerShell venv helper).
+- `local_4060` preset (RTX 4060 8 GB sizing) from `config.py::apply_preset`.
+- `_wheels/` ignore entry from `.gitignore` (used to stage local
+  `torch+CUDA` wheels for Windows).
+- README's "本地 Windows + 自家 NVIDIA 显卡" reproduction section and the
+  `local_4060` row in the preset table.
+
+### Changed
+
+- README "复现" section reorganised: Colab one-click first, single-stage
+  debugging second.
+
 ## v0.2 — DPO + sparse baselines + auto report
 
 ### Added
@@ -95,7 +115,6 @@ stack and can be deployed on Colab.
   (torch 2.5.1, transformers 4.45.2, etc.).
 - `.gitignore` cleaned up: keeps `notebooks/*.ipynb` tracked, ignores HF
   cache.
-- `scripts/activate_venv.ps1` helper for PowerShell users.
 
 ### Colab
 

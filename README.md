@@ -56,77 +56,60 @@ ratings.csv  ──►  RQ-VAE  ──►  每部电影 = (id_a, id_b)
 
 ---
 
-## 复现 — 三种姿势挑一个
+## 复现 — Colab 一键 + 单步调试
 
-### 姿势 1：本地 Windows + 自家 NVIDIA 显卡
+主战场就是 Colab。本地不再支持 GPU 训练（4060 8GB 跑这个数据集挤得很，反而不如直接租）。
 
-> 在 RTX 4060 (8 GB) 上验证过，免费 Colab T4 有的活儿这里都能干，而且没有 12 小时上限。
-
-```powershell
-git clone https://github.com/MasterpieceXu/Tiger-dpo-recsys.git
-cd Tiger-dpo-recsys
-
-# 装 Python 3.11 venv（Python 必须是 3.11）
-py -3.11 -m venv .venv
-. .\scripts\activate_venv.ps1
-
-# 必须用 CUDA 版 torch；下面这条会自动从官方 wheel 仓装匹配版本
-pip install --upgrade pip
-pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
-
-# 验证 GPU
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-
-# 拉数据集（240 MB）
-mkdir dataset
-curl.exe -L -o dataset/ml-32m.zip https://files.grouplens.org/datasets/movielens/ml-32m.zip
-Expand-Archive dataset/ml-32m.zip dataset/
-
-# 跑流水线（4060 8GB 显存推荐用 local_4060 预设；显存更大可以直接 pro_colab_full）
-python scripts/run_pipeline.py --preset local_4060
-```
-
-跑完之后看：
-
-- `outputs/REPORT.md` —— 带表格的对比报告（最有用）
-- `models/tiger_final/` —— 监督微调后的 TIGER 检查点
-- `models/onerec_lite_dpo/` —— DPO 对齐后的 TIGER 检查点
-- `outputs/evaluation_results.json` —— 原始评测数字
-- `outputs/dpo_metrics.json` —— DPO 训练逐 epoch 指标
-
-### 姿势 2：Colab 一键
+### Colab 一键
 
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MasterpieceXu/Tiger-dpo-recsys/blob/main/notebooks/colab_train.ipynb)
 
-点这个按钮 → `Runtime → Change runtime type → T4 GPU` (Free) 或 `A100/V100`
-(Pro) → `Runtime → Run all`。
+点 badge → `Runtime → Change runtime type → T4 GPU`（Free）或 `A100 / V100`（Pro）
+→ `Runtime → Run all`。
 
-Notebook 第 1 个 cell 控制预设：
+Notebook 第一个 cell 选预设：
 
 | 预设 | 适用 | 时长 |
 | --- | --- | --- |
-| `local_smoke` | 只想验证代码不出错 | <30 分钟，CPU 也行 |
+| `local_smoke` | 验证代码没报错 | <30 分钟，CPU 也能跑 |
 | `free_colab_safe` | 免费 T4 | ~3-4 小时 |
 | `pro_colab_full` | Pro 账号、要论文级数字 | ~8-10 小时 |
 
-跑完后所有产物会自动备份到 `Drive/MyDrive/tiger-dpo-recsys-runs/<preset>-<时间戳>/`。
+跑完后产物自动备份到 `Drive/MyDrive/tiger-dpo-recsys-runs/<preset>-<时间戳>/`，
+runtime 断了也不丢。
 
-### 姿势 3：单步调试（懒得跑全程）
+### 单步调试（在哪都能跑）
 
-每个 stage 都可以独立跑，方便挂断点：
+每个 stage 都能独立跑，方便挂断点 / 单测：
 
 ```bash
-python scripts/run_pipeline.py --stages 0       # 环境/数据自检
-python scripts/run_pipeline.py --stages 1       # 数据预处理 + RQ-VAE
-python scripts/run_pipeline.py --stages 2       # 用户序列生成
-python scripts/run_pipeline.py --stages 3       # TIGER 监督微调
-python scripts/run_pipeline.py --stages 4       # 评测（含 baseline）
-python scripts/run_pipeline.py --stages 5       # OneRec-lite + DPO
-python scripts/run_pipeline.py --stages 6       # 仅渲染 outputs/REPORT.md
+# 装依赖（CPU 版 torch，足够跑 local_smoke 预设验证代码）
+pip install -r requirements.txt
+
+# 拉数据
+mkdir -p dataset && cd dataset
+curl -LO https://files.grouplens.org/datasets/movielens/ml-32m.zip
+unzip ml-32m.zip && cd ..
+
+# 一个一个 stage 跑
+python scripts/run_pipeline.py --preset local_smoke --stages 0       # 环境自检
+python scripts/run_pipeline.py --preset local_smoke --stages 1       # 数据预处理 + RQ-VAE
+python scripts/run_pipeline.py --preset local_smoke --stages 2       # 用户序列生成
+python scripts/run_pipeline.py --preset local_smoke --stages 3       # TIGER SFT
+python scripts/run_pipeline.py --preset local_smoke --stages 4       # 评测（含 baseline）
+python scripts/run_pipeline.py --preset local_smoke --stages 5       # OneRec-lite + DPO
+python scripts/run_pipeline.py --preset local_smoke --stages 6       # 渲染 REPORT.md
 ```
 
-也可以混合：`--stages 4,6`（重新评测后立即重出报告）。
+也可以混合：`--stages 4,6`（重评测后立即重出报告）。
+
+跑完之后看：
+
+- `outputs/REPORT.md` —— 对比报告（最有用）
+- `models/tiger_final/` —— 监督微调后的 TIGER
+- `models/onerec_lite_dpo/` —— DPO 对齐后的 TIGER
+- `outputs/evaluation_results.json` —— 原始评测数字
+- `outputs/dpo_metrics.json` —— DPO 训练逐 epoch 指标
 
 ---
 
@@ -242,8 +225,7 @@ Tiger-dpo-recsys/
 │   ├── evaluation.py            # Stage 4 稀疏 baselines + 多 TIGER 变体评测
 │   └── report.py                # Stage 6 渲染 REPORT.md
 ├── scripts/
-│   ├── run_pipeline.py          # 一条命令跑完所有 stage
-│   └── activate_venv.ps1        # Windows PowerShell 激活 venv
+│   └── run_pipeline.py          # 一条命令跑完所有 stage
 ├── notebooks/
 │   └── colab_train.ipynb        # Colab 一键训练 + Drive 备份
 ├── dataset/ml-32m/              # 数据（gitignored）
@@ -257,14 +239,13 @@ Tiger-dpo-recsys/
 
 ## 预设有什么差别
 
-`config.py::apply_preset` 控制四档。看着像四份配置，其实就是改了三个钮：
+`config.py::apply_preset` 控制三档。看着像三份配置，其实就是改了三个钮：
 **用多少用户**、**TIGER 训几个 epoch / 多大 batch**、**DPO 训几个 epoch**。
 
 | Preset | 训练用户 | TIGER epochs | TIGER batch (×grad_accum) | DPO epochs | 评测采样 |
 | --- | --- | --- | --- | --- | --- |
 | `default` | 全量 | 5 | 32 (×1) | 2 | 5k |
 | `local_smoke` | 5k | 1 | 8 (×1) | 1 | 500 |
-| `local_4060` | 100k | 3 | 8 (×4) | 2 | 5k |
 | `free_colab_safe` | 150k | 3 | 16 (×2) | 2 | 5k |
 | `pro_colab_full` | 全量 | 5 | 24 (×2) | 3 | 10k |
 
@@ -278,14 +259,12 @@ GR_PRESET=free_colab_safe python scripts/run_pipeline.py
 
 ## 已知的几个坑
 
-- **必须 Python 3.11**：3.13 上 sentencepiece 还没有官方 wheel，会失败。
-- **必须 CUDA 版 torch**：`pip install -r requirements.txt` 默认装的是
-  CPU 版，在本地 GPU 上跑要按上面"姿势 1"那条 cu121 wheel 重装。
+- **必须 Python 3.11**：3.13 上 sentencepiece 还没有官方 wheel，会失败。Colab
+  默认就是 3.11，直接用就行。
 - **第一次跑会从 HuggingFace Hub 下 t5-small**（~250 MB），跑之前确认有
   网络访问。
-- **fp16 在 CPU 上会报错**：代码已经做了 `if torch.cuda.is_available()` 自
-  动回退，但如果你在没有 GPU 的机器上手动改 config 把 `fp16=True`，仍然会
-  炸。
+- **fp16 自动跟随 CUDA**：代码里已经做了 `if torch.cuda.is_available()` 的回
+  退，所以在 CPU-only 的环境（比如 `local_smoke`）也不会炸。
 
 ## 致谢
 

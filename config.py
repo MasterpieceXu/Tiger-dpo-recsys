@@ -149,10 +149,8 @@ def apply_preset(cfg: Config, name: str) -> Config:
 
     * ``default``         – original paper-ish settings (full ml-32m).
     * ``local_smoke``     – tiny subset, runs in <30 min on CPU. Numbers are
-                            meaningless – use this only to validate code paths.
-    * ``local_4060``      – sized for a desktop RTX 4060 (8 GB VRAM). Uses
-                            smaller batches + more gradient accumulation than
-                            the Colab T4 preset. Around 100k users, ~4-6 h.
+                            meaningless – use this only to validate code paths
+                            before launching a real run on Colab.
     * ``free_colab_safe`` – fits on a Colab free T4 (16 GB) and finishes in
                             ~3-4 hours.
     * ``pro_colab_full``  – full ml-32m on Colab Pro (T4 / V100), ~8-10 hours.
@@ -179,23 +177,6 @@ def apply_preset(cfg: Config, name: str) -> Config:
         cfg.dpo.num_epochs = 1
         cfg.dpo.batch_size = 4
         cfg.eval.max_test_users = 500
-        return cfg
-
-    if name == "local_4060":
-        # Desktop RTX 4060 has 8 GB VRAM; ~5 GB free after the OS/browser.
-        # We halve the per-device batch vs. the T4 preset and double grad
-        # accumulation so the optimizer sees the same effective batch size.
-        cfg.data.max_users = 100_000
-        cfg.rqvae.epochs = 25
-        cfg.tiger.num_train_epochs = 3
-        cfg.tiger.per_device_train_batch_size = 8
-        cfg.tiger.gradient_accumulation_steps = 4
-        cfg.tiger.max_length = 320
-        cfg.tiger.dataloader_num_workers = 2
-        cfg.tiger.fp16 = True
-        cfg.dpo.num_epochs = 2
-        cfg.dpo.batch_size = 4
-        cfg.eval.max_test_users = 5_000
         return cfg
 
     if name == "free_colab_safe":
