@@ -218,6 +218,9 @@ cache/
 .cache/huggingface/
 hf_cache/
 
+# Local pip wheel staging area (used to install torch+CUDA on Windows)
+_wheels/
+
 # Notebook outputs (we keep notebook source but not checkpoints)
 .ipynb_checkpoints/
 
