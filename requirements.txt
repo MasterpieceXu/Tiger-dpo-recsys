@@ -1,15 +1,26 @@
-torch
-transformers
-datasets
-accelerate
-scikit-learn
-pandas
-numpy
-tqdm
-matplotlib
-seaborn
-tensorboard
-wandb
-einops
-sentencepiece
-protobuf
+# Core ML stack — versions pinned to a known-good, Python 3.11 / Colab-compatible set.
+# On Colab these versions are already (or close to) the defaults, so `pip install -r requirements.txt`
+# is a no-op or a quick upgrade.
+
+torch>=2.2,<2.6
+transformers>=4.41,<4.46
+datasets>=2.18,<3.0
+accelerate>=0.30,<1.0
+tokenizers>=0.19,<0.21
+sentencepiece>=0.2.0
+protobuf>=3.20,<5.0
+
+# Data / scientific
+numpy>=1.26,<2.1
+pandas>=2.0,<2.3
+scikit-learn>=1.3,<1.6
+scipy>=1.11,<1.14
+
+# Utilities
+tqdm>=4.66
+einops>=0.7
+matplotlib>=3.7
+seaborn>=0.13
+
+# Logging / experiment tracking (optional but imported in places)
+tensorboard>=2.15

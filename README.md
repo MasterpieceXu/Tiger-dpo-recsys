@@ -36,16 +36,44 @@ GR-movie-recommendation/
 
 ## 🛠️ 环境设置
 
-### 1. 安装依赖
+> **建议**：本仓库的代码已对齐 Python 3.11 + PyTorch 2.5 + Transformers 4.45 这套
+> 与 Google Colab 完全兼容的栈。下面给出了「本地 venv」和「Colab 训练」两条路径。
 
-```bash
+### 1. 本地：创建项目内独立 venv
+
+仓库要求至少安装一个 Python 3.11 解释器（Windows 可用 [python.org 安装包](https://www.python.org/downloads/release/python-3119/)，并勾选 *Add to PATH*）。
+
+```powershell
+# 在仓库根目录执行（PowerShell）
+py -3.11 -m venv .venv
+. .\scripts\activate_venv.ps1     # 或: . .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip wheel setuptools
 pip install -r requirements.txt
 ```
 
-### 2. 下载数据
+```bash
+# Linux / macOS
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip wheel setuptools
+pip install -r requirements.txt
+```
+
+激活后 `which python` / `Get-Command python` 应当指向 `.venv` 下，而不是系统 Python。
+
+### 2. Colab：一键训练 notebook
+
+仓库根目录里有 [`notebooks/colab_train.ipynb`](notebooks/colab_train.ipynb)，按顺序执行 cell 即可：
+
+1. 切到 GPU runtime（`Runtime → Change runtime type → T4 GPU`）。
+2. 第一段 cell 修改 `GITHUB_URL` 为你的仓库地址，需要的话开启 `PERSIST_TO_DRIVE` 把模型回写到 Google Drive。
+3. 后续 cell 会依次完成：克隆代码 → 安装依赖 → 下载 MovieLens-32M → 跑完整 pipeline → 备份产物。
+
+完整 Stage 1~4 在 T4 上大约需 2~3 小时；想先跑通流程可以把 cell 里的 `SMOKE_TEST = True`，10 分钟内即可走完。
+
+### 3. 下载数据（仅本地训练时需要手动下）
 
 ```bash
-# 下载MovieLens-32M数据集
 wget https://files.grouplens.org/datasets/movielens/ml-32m.zip
 unzip ml-32m.zip -d dataset/
 ```
@@ -188,6 +216,27 @@ class Config:
 1. **单步调试**：每个阶段单独运行
 2. **日志查看**：检查logs/目录下的日志文件
 3. **小数据测试**：减少数据量进行快速测试
+
+### 已知的依赖兼容性说明
+
+仓库对应的依赖栈：
+
+| 组件 | 版本 |
+| --- | --- |
+| Python | 3.11.x |
+| torch | 2.2 ~ 2.5 |
+| transformers | 4.41 ~ 4.45 |
+| accelerate | 0.30 ~ 0.x |
+| numpy | 1.26 ~ 2.0 |
+
+代码里已经做了如下兼容修复：
+
+- `TrainingArguments` 使用 `eval_strategy`（替代旧的 `evaluation_strategy`，4.46+ 已删除）。
+- `T5Tokenizer` 替换为 `AutoTokenizer(use_fast=True)`，避免 `T5Tokenizer` 在新版本被废弃。
+- T5 生成时去掉了 `do_sample=True` 与 `num_beams>1` 的冲突组合。
+- Seq2Seq 训练 label padding 用 `-100` 屏蔽，避免计入交叉熵。
+- `fp16` 仅在检测到 CUDA 时启用，CPU 上自动回退。
+- `src/*.py` 在文件顶部统一把项目根目录插入到 `sys.path`，无论以模块还是脚本方式启动都能 import。
 
 ## 📚 参考文献
 

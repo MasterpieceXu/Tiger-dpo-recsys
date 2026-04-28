@@ -1,16 +1,26 @@
 """
 Data preprocessing for MovieLens-32M dataset
 """
-import pandas as pd
+import os
+import sys
+import re
+import json
+import logging
+from typing import Dict, List, Tuple
+
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import LabelEncoder
-import re
-import json
-from typing import Dict, List, Tuple
-import logging
-from utils import load_movielens_data, filter_data
+
+# Make `utils` (which lives at the project root) importable whether this file is
+# run directly (`python src/data_preprocessing.py`) or imported as `src.data_preprocessing`.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from utils import load_movielens_data, filter_data  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +167,6 @@ def load_corpus(corpus_path: str) -> Tuple[List[Dict], np.ndarray]:
     return corpus_data, tfidf_features
 
 if __name__ == "__main__":
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    
     from config import Config
     from utils import setup_logging
     

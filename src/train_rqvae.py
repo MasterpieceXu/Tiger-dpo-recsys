@@ -13,13 +13,16 @@ from tqdm import tqdm
 import logging
 from typing import List, Dict
 
-# Add parent directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path so the absolute imports below work whether the
+# script is invoked as a module or directly.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-from src.rqvae import RQVAE
-from src.data_preprocessing import MovieLensPreprocessor, load_corpus
-from config import Config
-from utils import set_seed, setup_logging
+from src.rqvae import RQVAE  # noqa: E402
+from src.data_preprocessing import MovieLensPreprocessor, load_corpus  # noqa: E402
+from config import Config  # noqa: E402
+from utils import set_seed, setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

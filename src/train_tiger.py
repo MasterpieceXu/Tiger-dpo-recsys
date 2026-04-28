@@ -18,12 +18,13 @@ from typing import Dict, List
 from tqdm import tqdm
 import numpy as np
 
-# Add parent directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-from src.tiger_model import TIGERModel, TIGERTokenizer
-from config import Config
-from utils import set_seed, setup_logging
+from src.tiger_model import TIGERModel, TIGERTokenizer  # noqa: E402
+from config import Config  # noqa: E402
+from utils import set_seed, setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +96,7 @@ class Seq2SeqDataset(Dataset):
     
     def __getitem__(self, idx):
         input_text, target_text = self.data[idx]
-        
-        # Encode input
+
         input_encoding = self.tokenizer.base_tokenizer(
             input_text,
             truncation=True,
@@ -104,20 +104,23 @@ class Seq2SeqDataset(Dataset):
             max_length=self.max_length,
             return_tensors='pt'
         )
-        
-        # Encode target
+
         target_encoding = self.tokenizer.base_tokenizer(
             target_text,
             truncation=True,
             padding='max_length',
-            max_length=64,  # Shorter for targets
+            max_length=64,
             return_tensors='pt'
         )
-        
+
+        # Replace pad-token positions with -100 so they are ignored by CE loss.
+        labels = target_encoding['input_ids'].squeeze().clone()
+        labels[labels == self.tokenizer.pad_token_id] = -100
+
         return {
             'input_ids': input_encoding['input_ids'].squeeze(),
             'attention_mask': input_encoding['attention_mask'].squeeze(),
-            'labels': target_encoding['input_ids'].squeeze()
+            'labels': labels,
         }
 
 class TIGERTrainer:
@@ -181,7 +184,9 @@ class TIGERTrainer:
         # Prepare datasets
         train_dataset, val_dataset = self.prepare_datasets(sequences_dir, training_mode)
         
-        # Training arguments
+        # Only enable fp16 when CUDA is available; CPU/MPS fp16 will hard-error.
+        use_fp16 = bool(self.config.tiger.fp16 and torch.cuda.is_available())
+
         training_args = TrainingArguments(
             output_dir=os.path.join(self.config.model_dir, "tiger"),
             num_train_epochs=self.config.tiger.num_train_epochs,
@@ -193,16 +198,17 @@ class TIGERTrainer:
             logging_steps=self.config.tiger.logging_steps,
             eval_steps=self.config.tiger.eval_steps,
             save_steps=self.config.tiger.save_steps,
-            evaluation_strategy="steps",
+            # `eval_strategy` is the new (4.41+) name; `evaluation_strategy` is removed in 4.46+.
+            eval_strategy="steps",
             save_strategy="steps",
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             gradient_accumulation_steps=self.config.tiger.gradient_accumulation_steps,
-            fp16=self.config.tiger.fp16,
+            fp16=use_fp16,
             dataloader_num_workers=self.config.tiger.dataloader_num_workers,
             remove_unused_columns=False,
-            report_to=None,  # Disable wandb/tensorboard for now
+            report_to="none",  # disable wandb/tensorboard auto-logging
         )
         
         # Data collator

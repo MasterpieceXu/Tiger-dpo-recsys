@@ -14,12 +14,15 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 import random
 
-# Add parent directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add parent directory to path so `src.*`, `config`, and `utils` resolve no
+# matter how this module is launched.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-from src.tiger_model import TIGERModel
-from config import Config
-from utils import calculate_metrics, setup_logging
+from src.tiger_model import TIGERModel  # noqa: E402
+from config import Config  # noqa: E402
+from utils import calculate_metrics, setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

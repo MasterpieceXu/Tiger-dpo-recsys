@@ -14,12 +14,13 @@ import logging
 from tqdm import tqdm
 from transformers import Trainer, TrainingArguments
 
-# Add parent directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-from src.tiger_model import TIGERModel
-from config import Config
-from utils import set_seed, setup_logging
+from src.tiger_model import TIGERModel  # noqa: E402
+from config import Config  # noqa: E402
+from utils import set_seed, setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +84,14 @@ class MultiItemDataset(Dataset):
             max_length=self.max_target_length,
             return_tensors='pt'
         )
-        
+
+        labels = target_encoding['input_ids'].squeeze().clone()
+        labels[labels == self.tokenizer.base_tokenizer.pad_token_id] = -100
+
         return {
             'input_ids': input_encoding['input_ids'].squeeze(),
             'attention_mask': input_encoding['attention_mask'].squeeze(),
-            'labels': target_encoding['input_ids'].squeeze()
+            'labels': labels,
         }
 
 class DPODataset(Dataset):
@@ -211,25 +215,27 @@ class OneRecLiteTrainer:
             num_target_items=5
         )
         
-        # Training arguments
+        use_fp16 = bool(self.config.tiger.fp16 and torch.cuda.is_available())
+
         training_args = TrainingArguments(
             output_dir=os.path.join(self.config.model_dir, "onerec_lite"),
             num_train_epochs=3,
             per_device_train_batch_size=16,
             per_device_eval_batch_size=32,
-            learning_rate=1e-5,  # Lower learning rate for fine-tuning
+            learning_rate=1e-5,  # lower lr for fine-tuning
             warmup_steps=100,
             weight_decay=0.01,
             logging_steps=50,
             eval_steps=200,
             save_steps=500,
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             save_strategy="steps",
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
-            fp16=self.config.tiger.fp16,
+            fp16=use_fp16,
             remove_unused_columns=False,
+            report_to="none",
         )
         
         # Trainer

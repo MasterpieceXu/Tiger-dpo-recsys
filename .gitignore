@@ -195,8 +195,9 @@ tmp/
 cache/
 .cache/
 
-# Jupyter notebook outputs
+# Jupyter notebook outputs (keep tracked notebooks under notebooks/)
 *.ipynb
+!notebooks/*.ipynb
 
 # Data files
 *.csv
@@ -212,6 +213,13 @@ cache/
 *.tar.gz
 *.rar
 *.7z
+
+# Hugging Face / Transformers cache
+.cache/huggingface/
+hf_cache/
+
+# Notebook outputs (we keep notebook source but not checkpoints)
+.ipynb_checkpoints/
 
 # Configuration files with sensitive data
 config_local.py
