@@ -1,278 +1,286 @@
 # Tiger-DPO-RecSys
 
-在 MovieLens-32M 上用 RQ-VAE 把电影压成"语义 ID"，让 T5-small 像写句子一样
-生成下一部电影，再用 DPO 拿用户真实喜好做偏好对齐。最后跟 ItemKNN / Popular /
-Random 几个老牌 baseline 摆在一起评。
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MasterpieceXu/Tiger-dpo-recsys/blob/main/notebooks/colab_train.ipynb)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
+[![PyTorch 2.5](https://img.shields.io/badge/pytorch-2.5-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> 这套代码原始版本来自 [xkx-youcha/GR-movie-recommendation](https://github.com/xkx-youcha/GR-movie-recommendation)。
-> 我接手以后：
->
-> 1. 把它从已经过期的依赖里拉回到当前能跑的栈（Python 3.11 / PyTorch 2.5 / Transformers 4.45）；
-> 2. 把原本写错的 DPO 训练循环重新实现了一遍，单独抽成一个 `src/dpo.py` 模块；
-> 3. 把会爆 39 GB 内存的 baseline 评测改成稀疏版本；
-> 4. 加了从 JSON 直接渲染对比表的报告生成器，跑完即出可以贴到任何文档里的结果。
->
-> 详细变更见 [CHANGELOG.md](CHANGELOG.md)。
+A generative recommender system for MovieLens-32M built on the **TIGER**
+recipe (Rajput et al., NeurIPS 2023) and aligned with **Direct Preference
+Optimization** (Rafailov et al., NeurIPS 2023).
 
-## 30 秒看明白做了啥
+每部电影通过 RQ-VAE 被编码为短码 (semantic ID)；T5-small 在用户历史上
+做监督微调，学会自回归地生成下一个 semantic ID；最后通过 DPO 进一步
+对齐用户的真实偏好。整个流水线还包含三个传统 baseline (ItemKNN /
+Popularity / Random) 与自动报告生成。
 
-```
-ratings.csv  ──►  RQ-VAE  ──►  每部电影 = (id_a, id_b)
-                                       │
-用户历史(电影序列) ─►  转成 <id_*> token 序列 ──┐
-                                              ▼
-                                      T5-small 监督微调 (Stage 3)
-                                              │
-                            真实下一部电影 = chosen ─┐
-                  模型自己 beam 出来的 ≠ chosen = rejected
-                                              ▼
-                                          DPO (Stage 5)
-                                              │
-                                              ▼
-   评测：TIGER+DPO  vs  TIGER(SFT only)  vs  ItemKNN  vs  Popular  vs  Random
-                                              │
-                                              ▼
-                                  outputs/REPORT.md (Markdown 对比表)
-```
-
-## 实验结果
-
-> 第一次跑完 `pro_colab_full` 后，下面这张表会被
-> [`src/report.py`](src/report.py) 自动覆盖成真实数字。
-
-| 模型              | Recall@10 | Recall@50 | NDCG@10 | NDCG@50 |
-| ----------------- | :-------: | :-------: | :-----: | :-----: |
-| **TIGER + DPO**   |    —      |    —      |    —    |    —    |
-| **TIGER (SFT)**   |    —      |    —      |    —    |    —    |
-| ItemKNN (Top-50)  |    —      |    —      |    —    |    —    |
-| Popular           |    —      |    —      |    —    |    —    |
-| Random            |    —      |    —      |    —    |    —    |
-
-跑完之后 `outputs/REPORT.md` 还会有：
-
-- 一段一句话 headline，可以直接抄进简历项目说明
-- DPO 消融行（SFT vs SFT+DPO），每个指标的 percentage point 提升
-- DPO 训练动力学（chosen reward / rejected reward / margin / accuracy 的逐 epoch 曲线）
+> Built on top of [xkx-youcha/GR-movie-recommendation](https://github.com/xkx-youcha/GR-movie-recommendation).
+> See [`CHANGELOG.md`](CHANGELOG.md) for the list of modifications.
 
 ---
 
-## 复现 — Colab 一键 + 单步调试
+## Features
 
-主战场就是 Colab。本地不再支持 GPU 训练（4060 8GB 跑这个数据集挤得很，反而不如直接租）。
+- **End-to-end pipeline** from raw `ratings.csv` to a Markdown comparison
+  report, organised into 6 self-contained stages.
+- **Generative retrieval** with semantic IDs (RQ-VAE) and a T5-small
+  encoder–decoder backbone.
+- **Preference alignment** via DPO with a frozen reference model and full
+  per-sample sequence log-probabilities (no batch-loss approximation).
+- **Memory-efficient baselines**: ItemKNN uses a sparse user–item matrix
+  with top-N nearest neighbours, keeping the similarity store at
+  ~30 MB on the full dataset (versus ~30 GB for the dense version).
+- **Configuration presets** for laptop CPU smoke tests, free-tier Colab,
+  and Colab Pro full runs.
+- **Reproducible**: pinned dependencies, Colab notebook with pre-flight
+  checks, and automatic Drive backups.
 
-### Colab 一键
+---
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MasterpieceXu/Tiger-dpo-recsys/blob/main/notebooks/colab_train.ipynb)
+## Architecture
 
-点 badge → `Runtime → Change runtime type → T4 GPU`（Free）或 `A100 / V100`（Pro）
-→ `Runtime → Run all`。
+```mermaid
+flowchart TD
+    A["ratings.csv<br/>movies.csv"] --> B["Stage 1<br/>Data preprocessing<br/>+ RQ-VAE training"]
+    B --> C["Semantic IDs<br/>movie_i → token_a · token_b"]
+    A --> D["Stage 2<br/>User sequence builder"]
+    C --> D
+    D --> E["Stage 3<br/>TIGER SFT<br/>T5-small encoder–decoder"]
+    E --> F["SFT checkpoint"]
+    F --> G["Stage 5<br/>OneRec-lite + DPO"]
+    F -. frozen reference .-> G
+    G --> H["DPO checkpoint"]
+    F --> I["Stage 4<br/>Evaluation"]
+    H --> I
+    J["ItemKNN / Popularity / Random"] --> I
+    I --> K["Stage 6<br/>Report generator"]
+    K --> L["outputs/REPORT.md<br/>recall@K, ndcg@K, DPO ablation"]
 
-Notebook 第一个 cell 选预设：
+    classDef stage fill:#e8f1ff,stroke:#3b82f6,stroke-width:1px,color:#0b1d40;
+    classDef artifact fill:#f7f7f7,stroke:#9ca3af,color:#111827;
+    class B,D,E,G,I,K stage;
+    class A,C,F,H,J,L artifact;
+```
 
-| 预设 | 适用 | 时长 |
-| --- | --- | --- |
-| `local_smoke` | 验证代码没报错 | <30 分钟，CPU 也能跑 |
-| `free_colab_safe` | 免费 T4 | ~3-4 小时 |
-| `pro_colab_full` | Pro 账号、要论文级数字 | ~8-10 小时 |
+The repository ships a single entry point (`scripts/run_pipeline.py`)
+that drives the six stages, and each stage can also be invoked
+independently for debugging.
 
-跑完后产物自动备份到 `Drive/MyDrive/tiger-dpo-recsys-runs/<preset>-<时间戳>/`，
-runtime 断了也不丢。
+---
 
-### 单步调试（在哪都能跑）
+## Quickstart
 
-每个 stage 都能独立跑，方便挂断点 / 单测：
+### Colab (recommended)
+
+1. Click the badge at the top of this README.
+2. `Runtime → Change runtime type → T4 GPU` (free) or `A100 / V100`
+   (Colab Pro).
+3. `Runtime → Run all`.
+
+The first cell selects a preset and prints a pre-flight summary (GPU,
+free RAM/VRAM, disk space). All artefacts are mirrored to
+`Drive/MyDrive/tiger-dpo-recsys-runs/<preset>-<timestamp>/` so a runtime
+disconnect does not lose progress.
+
+### Local (CPU smoke test only)
+
+For environments without a GPU, the `local_smoke` preset runs the entire
+pipeline on a 5 000-user subset in under 30 minutes. The resulting
+metrics are not meaningful — this preset exists only to validate that
+the codebase runs end-to-end on a given machine.
 
 ```bash
-# 装依赖（CPU 版 torch，足够跑 local_smoke 预设验证代码）
+git clone https://github.com/MasterpieceXu/Tiger-dpo-recsys.git
+cd Tiger-dpo-recsys
+
+python -m venv .venv
+source .venv/bin/activate           # Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 拉数据
 mkdir -p dataset && cd dataset
 curl -LO https://files.grouplens.org/datasets/movielens/ml-32m.zip
 unzip ml-32m.zip && cd ..
 
-# 一个一个 stage 跑
-python scripts/run_pipeline.py --preset local_smoke --stages 0       # 环境自检
-python scripts/run_pipeline.py --preset local_smoke --stages 1       # 数据预处理 + RQ-VAE
-python scripts/run_pipeline.py --preset local_smoke --stages 2       # 用户序列生成
-python scripts/run_pipeline.py --preset local_smoke --stages 3       # TIGER SFT
-python scripts/run_pipeline.py --preset local_smoke --stages 4       # 评测（含 baseline）
-python scripts/run_pipeline.py --preset local_smoke --stages 5       # OneRec-lite + DPO
-python scripts/run_pipeline.py --preset local_smoke --stages 6       # 渲染 REPORT.md
+python scripts/run_pipeline.py --preset local_smoke
 ```
 
-也可以混合：`--stages 4,6`（重评测后立即重出报告）。
-
-跑完之后看：
-
-- `outputs/REPORT.md` —— 对比报告（最有用）
-- `models/tiger_final/` —— 监督微调后的 TIGER
-- `models/onerec_lite_dpo/` —— DPO 对齐后的 TIGER
-- `outputs/evaluation_results.json` —— 原始评测数字
-- `outputs/dpo_metrics.json` —— DPO 训练逐 epoch 指标
+GPU training is intended to run on Colab; no local CUDA setup
+instructions are provided.
 
 ---
 
-## 这个项目的几个"做对了"的地方
+## Stages
 
-聊三个简历里值得拎出来说的细节，刚好对应代码里的三个文件：
+Each stage writes to a fixed location and can be re-run independently.
 
-### 1. DPO 写对了 — `src/dpo.py`
+| Stage | Command flag         | Output                                  |
+| :---: | -------------------- | --------------------------------------- |
+|   0   | `--stages 0`         | environment & dataset checks            |
+|   1   | `--stages 1`         | RQ-VAE checkpoint, semantic-ID mapping  |
+|   2   | `--stages 2`         | tokenised user sequences                |
+|   3   | `--stages 3`         | TIGER SFT checkpoint                    |
+|   4   | `--stages 4`         | `outputs/evaluation_results.json`       |
+|   5   | `--stages 5`         | DPO checkpoint, `outputs/dpo_metrics.json` |
+|   6   | `--stages 6`         | `outputs/REPORT.md`                     |
 
-原版 `OneRecLiteTrainer.train_dpo` 的训练循环里，policy 模型的前向被
-`with torch.no_grad():` 包住了。这意味着 `loss.backward()` 算出来的梯度全是
-0，DPO "训练" 实际上是个空操作。修复时要做两件事：
-
-```python
-def compute_sequence_logprob(model, input_ids, attention_mask, labels):
-    """给定 (prompt, response)，返回每个样本的 log P(response | prompt)。"""
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-    log_probs = F.log_softmax(outputs.logits, dim=-1)         # [B, L, V]
-    label_mask = (labels != -100).float()                     # 屏蔽 padding
-    safe_labels = labels.clamp(min=0)                         # gather 不能见 -100
-    token_logp = log_probs.gather(2, safe_labels.unsqueeze(-1)).squeeze(-1)
-    return (token_logp * label_mask).sum(dim=1)               # [B]
-
-# DPO loss (Rafailov et al., NeurIPS 2023)
-def dpo_loss(pi_pos, pi_neg, ref_pos, ref_neg, beta=0.1):
-    margin = (pi_pos - ref_pos) - (pi_neg - ref_neg)
-    loss = -F.logsigmoid(beta * margin).mean()
-    return {"loss": loss, "reward_margin": margin.mean(),
-            "accuracy": (margin > 0).float().mean()}
-```
-
-训练循环里 policy 路径 **不能** 套 `no_grad`，reference 路径 **必须** 套：
-
-```python
-pi_pos  = compute_sequence_logprob(policy.model, x, mask, y_pos)   # 带梯度
-pi_neg  = compute_sequence_logprob(policy.model, x, mask, y_neg)
-with torch.no_grad():
-    ref_pos = compute_sequence_logprob(reference.model, x, mask, y_pos)
-    ref_neg = compute_sequence_logprob(reference.model, x, mask, y_neg)
-loss = dpo_loss(pi_pos, pi_neg, ref_pos, ref_neg, beta=0.1)["loss"]
-loss.backward()
-```
-
-`DPOTrainer` 还会顺便记录每个 batch 的 chosen reward、rejected reward、
-margin 和 accuracy（chosen reward > rejected reward 的比例），这四个指标
-是 DPO 训练健康度的标准看板。
-
-### 2. Baseline 评测不爆内存 — `src/evaluation.py`
-
-原版 `BaselineRecommender._prepare_data()` 里有这么一行：
-
-```python
-self.item_similarity = cosine_similarity(item_features)   # 70k × 70k 稠密矩阵
-```
-
-ml-32m 上 ≈ **39 GB float64**。免费 Colab 12 GB RAM 必爆，Pro 25 GB 也爆，
-所有人都一样的死。
-
-修复思路：根本就不需要稠密矩阵，每个 item 只需要它最相近的 k 个邻居。改成
-稀疏 user-item 矩阵 + `sklearn.neighbors.NearestNeighbors`，每个 item
-只存 Top-50 邻居：
-
-```python
-self.user_item = csr_matrix(...)                                     # 稀疏 user × item
-knn = NearestNeighbors(n_neighbors=51, metric='cosine', n_jobs=-1)
-knn.fit(self.user_item.T)                                            # item × user
-distances, indices = knn.kneighbors(self.user_item.T)
-self._neighbor_idx = indices[:, 1:]                                  # [I, 50]
-self._neighbor_sim = (1 - distances)[:, 1:]
-```
-
-内存从 **39 GB → 30 MB**。
-
-### 3. 报告自动生成 — `src/report.py`
-
-跑完所有 stage 后通过这一个脚本一键产出 Markdown：
+Stages may be combined. For example, after editing the evaluator and
+wanting a fresh report:
 
 ```bash
-python scripts/run_pipeline.py --stages 6
-# 输出: outputs/REPORT.md
+python scripts/run_pipeline.py --stages 4,6 --preset free_colab_safe
 ```
-
-里面分四节：
-
-1. **Headline**：一句话 "TIGER+DPO 在 ml-32m 测试集 Recall@50 = X.XXXX，比
-   ItemKNN baseline 高 +Y.YY pp"
-2. **Full comparison**：5 个模型 × 6 个指标的完整表
-3. **DPO ablation**：SFT vs SFT+DPO 的逐指标 pp 提升
-4. **DPO training dynamics**：每 epoch 的 loss / margin / accuracy
-
-这个报告就是为了**直接贴到简历或文档里**而设计的。
 
 ---
 
-## 项目结构
+## Configuration
+
+Hyper-parameters are centralised in `config.py`. Three presets are
+provided through `apply_preset` and can be selected via the `--preset`
+CLI flag or the `GR_PRESET` environment variable.
+
+| Preset             | Users | TIGER epochs | TIGER batch (×accum) | DPO epochs | Test users | Wall-clock              |
+| ------------------ | :---: | :----------: | :------------------: | :--------: | :--------: | ----------------------- |
+| `local_smoke`      |   5k  |       1      |       8 (×1)         |     1      |    500     | < 30 min, CPU friendly  |
+| `free_colab_safe`  | 150k  |       3      |      16 (×2)         |     2      |   5 000    | ~3–4 h on Colab T4      |
+| `pro_colab_full`   |  all  |       5      |      24 (×2)         |     3      |  10 000    | ~8–10 h on Colab Pro    |
+
+A separate `default` preset preserves the upstream paper-style settings
+(full dataset, no user cap, batch size 32) and is used when no preset is
+specified.
+
+---
+
+## Outputs
+
+After a complete run, the following artefacts are produced:
+
+| Path                                | Contents                                                    |
+| ----------------------------------- | ----------------------------------------------------------- |
+| `models/rqvae_final.pt`             | trained RQ-VAE                                              |
+| `models/tiger_final/`               | TIGER (SFT only) checkpoint and tokenizer                   |
+| `models/onerec_lite_dpo/`           | TIGER (SFT + DPO) checkpoint                                |
+| `outputs/evaluation_results.json`   | raw per-model recall@K and ndcg@K                           |
+| `outputs/dpo_metrics.json`          | per-epoch DPO loss, reward margin and accuracy              |
+| `outputs/REPORT.md`                 | Markdown comparison report (the user-facing output)         |
+
+The report contains:
+
+1. A headline summarising the best model and its primary metric.
+2. A full comparison table over all configured `recall@K` and `ndcg@K`.
+3. The DPO ablation row (SFT vs SFT + DPO) with per-metric deltas.
+4. The DPO training dynamics (loss / reward margin / accuracy per epoch).
+
+---
+
+## Implementation notes
+
+### DPO objective
+
+For a preference pair `(prompt, chosen, rejected)`, let
+$\pi_\theta$ denote the policy model and $\pi_{\text{ref}}$ a frozen
+copy of the SFT model. With sequence log-probabilities
+
+$$
+\log\pi(y \mid x) = \sum_{t} \log p(y_t \mid y_{\lt t}, x),
+$$
+
+the loss optimised in `src/dpo.py` is
+
+$$
+\mathcal{L}_{\text{DPO}} = -\mathbb{E}\bigl[\log\sigma\bigl(
+\beta\,(\log\pi_\theta(y_w \mid x) - \log\pi_{\text{ref}}(y_w \mid x))
+- \beta\,(\log\pi_\theta(y_l \mid x) - \log\pi_{\text{ref}}(y_l \mid x))
+\bigr)\bigr],
+$$
+
+with $\beta = 0.1$ by default. Padding tokens are masked using `-100`
+labels so they do not contribute to the per-sample log-probability sum.
+Only the policy path retains gradients; the reference path runs under
+`torch.no_grad()`.
+
+Per-batch diagnostics (`reward_chosen`, `reward_rejected`,
+`reward_margin`, `accuracy = P(margin > 0)`) are logged to
+`outputs/dpo_metrics.json` for the report generator to render.
+
+### ItemKNN at scale
+
+The dense item × item cosine-similarity matrix used by traditional
+ItemKNN scales as `O(I²)` and exceeds 30 GB on MovieLens-32M
+(≈ 87 000 items). The implementation in `src/evaluation.py` instead
+builds a sparse `csr_matrix` of user–item interactions and uses
+`sklearn.neighbors.NearestNeighbors` to retrieve the top-N nearest
+neighbours per item, reducing the storage to `O(I × N)` ≈ 30 MB at
+`N = 50`.
+
+---
+
+## Project structure
 
 ```
 Tiger-dpo-recsys/
-├── README.md                    # 你正在看
-├── CHANGELOG.md                 # v0.1 / v0.2 改了什么
-├── config.py                    # 所有超参 + 4 档预设
-├── requirements.txt             # 钉了版本
-├── utils.py                     # 数据 / 指标小工具
+├── README.md
+├── CHANGELOG.md
+├── LICENSE
+├── config.py                    # all hyper-parameters and presets
+├── requirements.txt             # pinned versions
+├── utils.py                     # shared data and metric utilities
 ├── src/
-│   ├── data_preprocessing.py    # ratings.csv 清洗 + 文本特征
-│   ├── rqvae.py                 # 残差量化 VAE
-│   ├── train_rqvae.py           # Stage 1 训练
-│   ├── sequence_generator.py    # Stage 2 用户序列
-│   ├── tiger_model.py           # T5-small 包装 + 自定义 tokenizer
-│   ├── train_tiger.py           # Stage 3 SFT
-│   ├── dpo.py                   # ★ DPO 算法核心
-│   ├── onerec_lite.py           # Stage 5 多项目 SFT + 偏好对构造 + 调 dpo.py
-│   ├── evaluation.py            # Stage 4 稀疏 baselines + 多 TIGER 变体评测
-│   └── report.py                # Stage 6 渲染 REPORT.md
+│   ├── data_preprocessing.py    # ratings filtering and text features
+│   ├── rqvae.py                 # residual-quantised VAE
+│   ├── train_rqvae.py           # Stage 1
+│   ├── sequence_generator.py    # Stage 2
+│   ├── tiger_model.py           # T5 wrapper and tokenizer extension
+│   ├── train_tiger.py           # Stage 3
+│   ├── dpo.py                   # DPO loss, log-probability, trainer
+│   ├── onerec_lite.py           # Stage 5 (preference-pair construction)
+│   ├── evaluation.py            # Stage 4 (TIGER variants + baselines)
+│   └── report.py                # Stage 6 (Markdown rendering)
 ├── scripts/
-│   └── run_pipeline.py          # 一条命令跑完所有 stage
+│   └── run_pipeline.py          # single entry point for all stages
 ├── notebooks/
-│   └── colab_train.ipynb        # Colab 一键训练 + Drive 备份
-├── dataset/ml-32m/              # 数据（gitignored）
-├── models/                      # 检查点（gitignored）
-├── outputs/
-│   ├── evaluation_results.json
-│   ├── dpo_metrics.json
-│   └── REPORT.md
+│   └── colab_train.ipynb        # Colab one-click training notebook
+├── dataset/ml-32m/              # data (gitignored)
+├── models/                      # checkpoints (gitignored)
+├── outputs/                     # JSON results + REPORT.md
 └── logs/
 ```
 
-## 预设有什么差别
+---
 
-`config.py::apply_preset` 控制三档。看着像三份配置，其实就是改了三个钮：
-**用多少用户**、**TIGER 训几个 epoch / 多大 batch**、**DPO 训几个 epoch**。
+## Requirements
 
-| Preset | 训练用户 | TIGER epochs | TIGER batch (×grad_accum) | DPO epochs | 评测采样 |
-| --- | --- | --- | --- | --- | --- |
-| `default` | 全量 | 5 | 32 (×1) | 2 | 5k |
-| `local_smoke` | 5k | 1 | 8 (×1) | 1 | 500 |
-| `free_colab_safe` | 150k | 3 | 16 (×2) | 2 | 5k |
-| `pro_colab_full` | 全量 | 5 | 24 (×2) | 3 | 10k |
+- **Python 3.11**. Versions ≤ 3.10 lack typing features used in the code,
+  and 3.13 has no official `sentencepiece` wheel at the time of writing.
+- **PyTorch 2.5**. The pipeline auto-detects CUDA and disables `fp16`
+  on CPU-only environments.
+- **Transformers ≥ 4.41, < 4.46**. Newer versions have removed the
+  `evaluation_strategy` keyword argument used by the trainer.
+- The first run downloads `t5-small` (~250 MB) from the Hugging Face Hub.
 
-切换：
+A complete dependency list with version ranges is in
+[`requirements.txt`](requirements.txt).
 
-```bash
-python scripts/run_pipeline.py --preset free_colab_safe
-# 或者用环境变量：
-GR_PRESET=free_colab_safe python scripts/run_pipeline.py
-```
+---
 
-## 已知的几个坑
+## References
 
-- **必须 Python 3.11**：3.13 上 sentencepiece 还没有官方 wheel，会失败。Colab
-  默认就是 3.11，直接用就行。
-- **第一次跑会从 HuggingFace Hub 下 t5-small**（~250 MB），跑之前确认有
-  网络访问。
-- **fp16 自动跟随 CUDA**：代码里已经做了 `if torch.cuda.is_available()` 的回
-  退，所以在 CPU-only 的环境（比如 `local_smoke`）也不会炸。
+- Rajput, S. *et al.* "Recommender Systems with Generative Retrieval."
+  *NeurIPS*, 2023. [arXiv:2305.05065](https://arxiv.org/abs/2305.05065)
+- Rafailov, R. *et al.* "Direct Preference Optimization: Your Language
+  Model is Secretly a Reward Model." *NeurIPS*, 2023.
+  [arXiv:2305.18290](https://arxiv.org/abs/2305.18290)
+- Harper, F. M. & Konstan, J. A. "The MovieLens Datasets: History and
+  Context." *ACM TiiS*, 2015.
+  [GroupLens, MovieLens-32M](https://grouplens.org/datasets/movielens/32m/)
 
-## 致谢
+## Acknowledgements
 
-- 上游基线：[xkx-youcha/GR-movie-recommendation](https://github.com/xkx-youcha/GR-movie-recommendation)
-- TIGER：[Rajput et al., *Recommender Systems with Generative Retrieval*, NeurIPS 2023](https://arxiv.org/abs/2305.05065)
-- DPO：[Rafailov et al., *Direct Preference Optimization*, NeurIPS 2023](https://arxiv.org/abs/2305.18290)
-- 数据：[MovieLens-32M, GroupLens Research](https://grouplens.org/datasets/movielens/32m/)
+The pipeline structure and the Stage 1 / Stage 2 implementations are
+adapted from
+[xkx-youcha/GR-movie-recommendation](https://github.com/xkx-youcha/GR-movie-recommendation).
+The MovieLens-32M dataset is provided by GroupLens Research at the
+University of Minnesota.
 
 ## License
 
-MIT。承袭自上游。
+Released under the MIT License. See [`LICENSE`](LICENSE) for details.
