@@ -235,20 +235,53 @@ class OneRecLiteTrainer:
 
         model = TIGERModel.from_pretrained(base_model_path).to(self.device)
 
+        # ``num_target_items`` was originally hardcoded to 5, which meant the
+        # dataset filter ``len(sequence) >= num_target_items + 2`` rejected
+        # every val/test user on small presets (e.g. local_smoke leaves only
+        # 6-item val sequences, so 5 + 2 = 7 dropped them all).
+        #
+        # Probe the actual val file once and pick the largest ``num_target_items``
+        # that still keeps the val split non-empty, capped at 5. Falls back to 2
+        # when the val file is missing entirely.
+        val_path = os.path.join(sequences_dir, "val_sequences.json")
+        try:
+            with open(val_path, "r", encoding="utf-8") as f:
+                val_lens = [len(v) for v in json.load(f).values()]
+            shortest_val = min(val_lens) if val_lens else 0
+        except FileNotFoundError:
+            shortest_val = 0
+        num_target_items = max(2, min(5, shortest_val - 2)) if shortest_val >= 4 else 2
+        logger.info(
+            "Multi-item SFT: num_target_items=%d (shortest val seq=%d)",
+            num_target_items, shortest_val,
+        )
+
         train_dataset = MultiItemDataset(
             os.path.join(sequences_dir, "train_sequences.json"),
             model.tokenizer,
             max_input_length=self.config.tiger.max_length,
-            num_target_items=5,
+            num_target_items=num_target_items,
         )
         val_dataset = MultiItemDataset(
             os.path.join(sequences_dir, "val_sequences.json"),
             model.tokenizer,
             max_input_length=self.config.tiger.max_length,
-            num_target_items=5,
+            num_target_items=num_target_items,
         )
 
+        # If the val split is empty (very small presets / short sequences),
+        # disable eval-during-training entirely instead of crashing inside
+        # the HF Trainer; we'll just skip best-checkpoint selection.
+        has_val = len(val_dataset) > 0
+        if not has_val:
+            logger.warning(
+                "Multi-item val dataset is empty; running without "
+                "eval-during-training and load_best_model_at_end."
+            )
+
         use_fp16 = bool(self.config.tiger.fp16 and torch.cuda.is_available())
+        # eval_steps and save_steps must be a round multiple of each other for
+        # ``load_best_model_at_end`` to work on transformers >= 4.45.
         training_args = TrainingArguments(
             output_dir=os.path.join(self.config.model_dir, "onerec_lite"),
             num_train_epochs=3,
@@ -258,15 +291,16 @@ class OneRecLiteTrainer:
             warmup_steps=100,
             weight_decay=0.01,
             logging_steps=50,
-            eval_steps=200,
+            eval_steps=500,
             save_steps=500,
-            eval_strategy="steps",
+            eval_strategy="steps" if has_val else "no",
             save_strategy="steps",
-            load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
+            load_best_model_at_end=has_val,
+            metric_for_best_model="eval_loss" if has_val else None,
             greater_is_better=False,
             fp16=use_fp16,
             remove_unused_columns=False,
+            save_total_limit=2,
             report_to="none",
         )
 
@@ -274,7 +308,7 @@ class OneRecLiteTrainer:
             model=model.model,
             args=training_args,
             train_dataset=train_dataset,
-            eval_dataset=val_dataset,
+            eval_dataset=val_dataset if has_val else None,
         )
         trainer.train()
 
@@ -337,17 +371,46 @@ class OneRecLiteTrainer:
         self.train_multi_item_generation(base_model_path, sequences_dir)
 
         # Step 2: build preference pairs from the SFT model.
+        # Pick a ``num_target_items`` that fits the actual test sequences:
+        # need ``len(seq) >= n + 2`` (so there's input + chosen) AND we need
+        # to be able to scrape ``n`` distinct ``rejected`` ids from the
+        # model's beams. On smoke runs the model is undertrained and beam
+        # outputs collapse, so 5 is too greedy -> 0 pairs survive.
+        test_path = os.path.join(sequences_dir, "test_sequences.json")
+        try:
+            with open(test_path, "r", encoding="utf-8") as f:
+                test_lens = [len(v) for v in json.load(f).values()]
+            shortest_test = min(test_lens) if test_lens else 0
+        except FileNotFoundError:
+            shortest_test = 0
+        pref_n = max(2, min(5, shortest_test - 2)) if shortest_test >= 4 else 2
+        logger.info(
+            "DPO preference builder: num_target_items=%d (shortest test seq=%d)",
+            pref_n, shortest_test,
+        )
+
         sft_path = os.path.join(self.config.model_dir, "onerec_lite_multi")
         sft_for_pairs = TIGERModel.from_pretrained(sft_path)
         builder = PreferenceDataBuilder(
             sft_model=sft_for_pairs,
-            num_target_items=5,
+            num_target_items=pref_n,
             num_beams=self.config.dpo.num_beams_for_pairs,
             num_candidates=self.config.dpo.num_candidates_for_pairs,
             device=self.device,
         )
         pref_path = os.path.join(self.config.output_dir, "dpo_preference_data.json")
-        builder.build(sequences_dir, pref_path)
+        records = builder.build(sequences_dir, pref_path)
+
+        if not records:
+            logger.warning(
+                "No DPO preference pairs were produced (under-trained SFT "
+                "model on a smoke run will often hit this). Skipping the "
+                "DPO step and returning the multi-item SFT model unchanged."
+            )
+            sft_model = TIGERModel.from_pretrained(sft_path)
+            os.makedirs(os.path.dirname(self.config.to_dpo_config().save_dir) or ".", exist_ok=True)
+            sft_model.save_pretrained(self.config.to_dpo_config().save_dir)
+            return sft_model
 
         # Step 3: DPO.
         return self.run_dpo(sft_path, pref_path)

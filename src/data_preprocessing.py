@@ -26,30 +26,48 @@ logger = logging.getLogger(__name__)
 
 class MovieLensPreprocessor:
     """Preprocessor for MovieLens data"""
-    
-    def __init__(self, data_dir: str, min_rating: float = 4.0, min_interactions: int = 5):
+
+    def __init__(
+        self,
+        data_dir: str,
+        min_rating: float = 4.0,
+        min_interactions: int = 5,
+        max_users: "int | None" = None,
+    ):
         self.data_dir = data_dir
         self.min_rating = min_rating
         self.min_interactions = min_interactions
+        # Cap the number of users kept after filtering. Picks the most-active
+        # users so all downstream stages (sequence generator, TIGER, eval, DPO)
+        # see a consistent subset. ``None`` keeps every filtered user.
+        self.max_users = max_users
         self.tfidf_vectorizer = None
         self.movie_encoder = None
         self.user_encoder = None
-        
+
     def load_and_filter_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Load and filter MovieLens data"""
         logger.info("Loading MovieLens data...")
         ratings, movies = load_movielens_data(self.data_dir)
-        
+
         logger.info(f"Original data: {len(ratings)} ratings, {len(movies)} movies")
-        
-        # Filter ratings
+
         filtered_ratings = filter_data(ratings, self.min_rating, self.min_interactions)
-        
-        # Keep only movies that appear in filtered ratings
+
+        if self.max_users is not None and self.max_users > 0:
+            user_counts = filtered_ratings['userId'].value_counts()
+            top_users = user_counts.head(self.max_users).index
+            before = len(filtered_ratings)
+            filtered_ratings = filtered_ratings[filtered_ratings['userId'].isin(top_users)]
+            logger.info(
+                "Sub-sampled to top %d most active users: %d -> %d ratings",
+                self.max_users, before, len(filtered_ratings),
+            )
+
         valid_movies = movies[movies['movieId'].isin(filtered_ratings['movieId'].unique())]
-        
+
         logger.info(f"Filtered data: {len(filtered_ratings)} ratings, {len(valid_movies)} movies")
-        
+
         return filtered_ratings, valid_movies
     
     def create_item_corpus(self, movies: pd.DataFrame) -> List[str]:

@@ -76,13 +76,12 @@ class RQVAETrainer:
         # Create dataset
         dataset = ItemCorpusDataset(corpus_data, tfidf_features)
         
-        # Create data loader
         dataloader = DataLoader(
             dataset,
             batch_size=self.config.rqvae.batch_size,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            num_workers=self.config.rqvae.dataloader_num_workers,
+            pin_memory=torch.cuda.is_available(),
         )
         
         return dataloader, tfidf_features.shape[1]

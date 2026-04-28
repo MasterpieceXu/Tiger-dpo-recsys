@@ -45,6 +45,10 @@ class RQVAEConfig:
     batch_size: int = 64
     learning_rate: float = 1e-3
     warmup_steps: int = 1000
+    # Use 0 on Windows or anywhere `multiprocessing.spawn` doesn't work for
+    # the DataLoader (some scipy sparse matrices fail to pickle); 4 is fine
+    # on Colab / Linux servers.
+    dataloader_num_workers: int = 4
 
 
 @dataclass
@@ -150,10 +154,16 @@ def apply_preset(cfg: Config, name: str) -> Config:
     * ``default``         – original paper-ish settings (full ml-32m).
     * ``local_smoke``     – tiny subset, runs in <30 min on CPU. Numbers are
                             meaningless – use this only to validate code paths
-                            before launching a real run on Colab.
+                            before launching a real run.
     * ``free_colab_safe`` – fits on a Colab free T4 (16 GB) and finishes in
-                            ~3-4 hours.
+                            ~3-4 hours. Also a good fit for any local 12-20 GB
+                            GPU (e.g. RTX 3060 12 GB, RTX 4070, RTX 4060 Ti).
     * ``pro_colab_full``  – full ml-32m on Colab Pro (T4 / V100), ~8-10 hours.
+                            Also a good fit for any local 22 GB+ GPU
+                            (e.g. RTX 3090, RTX 4090, A5000, A100).
+    * ``local_gpu``       – meta-preset that detects the largest local CUDA
+                            device and dispatches to one of the above. Falls
+                            back to ``local_smoke`` if no GPU is found.
     """
     name = name.lower()
     cfg.preset = name
@@ -161,19 +171,30 @@ def apply_preset(cfg: Config, name: str) -> Config:
     if name == "default":
         return cfg
 
+    if name == "local_gpu":
+        resolved = _resolve_local_gpu_preset()
+        cfg.preset = resolved
+        return apply_preset(cfg, resolved)
+
     if name == "local_smoke":
-        cfg.data.max_users = 5_000
+        cfg.data.max_users = 2_000
         cfg.data.max_seq_length = 30
         cfg.rqvae.epochs = 3
         cfg.rqvae.batch_size = 64
+        cfg.rqvae.dataloader_num_workers = 0
         cfg.tiger.num_train_epochs = 1
         cfg.tiger.per_device_train_batch_size = 8
         cfg.tiger.gradient_accumulation_steps = 1
         cfg.tiger.max_length = 256
-        cfg.tiger.eval_steps = 50
-        cfg.tiger.save_steps = 200
+        # Bumped from 50/200 because at 12k train steps an eval-every-50
+        # config triggers ~250 evals, each one running over the val split.
+        # 1000 keeps `load_best_model_at_end` working with ~12 evals/epoch.
+        cfg.tiger.eval_steps = 1000
+        cfg.tiger.save_steps = 1000
         cfg.tiger.dataloader_num_workers = 0
-        cfg.tiger.fp16 = False
+        # Note: ``train_tiger.py`` already gates fp16 on ``torch.cuda.is_available()``,
+        # so leaving it at the default ``True`` is safe on CPU too — it just gets
+        # disabled there. On a local GPU this roughly halves Stage 3 wall-clock.
         cfg.dpo.num_epochs = 1
         cfg.dpo.batch_size = 4
         cfg.eval.max_test_users = 500
@@ -207,5 +228,42 @@ def apply_preset(cfg: Config, name: str) -> Config:
 
     raise ValueError(
         f"Unknown preset {name!r}. Choose from: default, local_smoke, "
-        "free_colab_safe, pro_colab_full"
+        "free_colab_safe, pro_colab_full, local_gpu"
     )
+
+
+# Floor of (largest) GPU VRAM in GB at which each base preset becomes the
+# recommended default for a local / on-prem run. Picked conservatively so
+# that fp16 activations + optimiser state still fit at the configured batch
+# sizes; nudge upward if you are hitting OOM.
+_LOCAL_GPU_VRAM_FLOORS_GB = (
+    (22.0, "pro_colab_full"),    # 3090 / 4090 / A5000 / A100 / H100
+    (12.0, "free_colab_safe"),   # T4 / 3060 12GB / 4070 / 4060 Ti 16GB
+    (0.0, "local_smoke"),        # tiny GPUs, integrated, or CPU-only
+)
+
+
+def _resolve_local_gpu_preset() -> str:
+    """Pick a base preset for the current host based on detected VRAM.
+
+    Imports ``torch`` lazily so that ``apply_preset`` stays importable in
+    environments where torch isn't installed yet (e.g. running the env-check
+    script before ``pip install``).
+    """
+    try:
+        import torch
+    except ImportError:
+        return "local_smoke"
+
+    if not torch.cuda.is_available():
+        return "local_smoke"
+
+    max_vram_gb = 0.0
+    for idx in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(idx)
+        max_vram_gb = max(max_vram_gb, props.total_memory / 1024**3)
+
+    for floor_gb, preset_name in _LOCAL_GPU_VRAM_FLOORS_GB:
+        if max_vram_gb >= floor_gb:
+            return preset_name
+    return "local_smoke"

@@ -208,6 +208,7 @@ class TIGERTrainer:
             fp16=use_fp16,
             dataloader_num_workers=self.config.tiger.dataloader_num_workers,
             remove_unused_columns=False,
+            save_total_limit=2,  # keep best + latest only; otherwise smoke runs eat ~10 GB of stale checkpoints
             report_to="none",  # disable wandb/tensorboard auto-logging
         )
         

@@ -24,10 +24,10 @@ Popularity / Random) 与自动报告生成。
 - **End-to-end pipeline** from raw `ratings.csv` to a Markdown comparison
   report, organised into 6 self-contained stages.
 - **Generative retrieval** with semantic IDs (RQ-VAE) and a T5-small
-  encoder–decoder backbone.
+  encoder-decoder backbone.
 - **Preference alignment** via DPO with a frozen reference model and full
   per-sample sequence log-probabilities (no batch-loss approximation).
-- **Memory-efficient baselines**: ItemKNN uses a sparse user–item matrix
+- **Memory-efficient baselines**: ItemKNN uses a sparse user-item matrix
   with top-N nearest neighbours, keeping the similarity store at
   ~30 MB on the full dataset (versus ~30 GB for the dense version).
 - **Configuration presets** for laptop CPU smoke tests, free-tier Colab,
@@ -42,10 +42,10 @@ Popularity / Random) 与自动报告生成。
 ```mermaid
 flowchart TD
     A["ratings.csv<br/>movies.csv"] --> B["Stage 1<br/>Data preprocessing<br/>+ RQ-VAE training"]
-    B --> C["Semantic IDs<br/>movie_i → token_a · token_b"]
+    B --> C["Semantic IDs<br/>movie_i -> token_a · token_b"]
     A --> D["Stage 2<br/>User sequence builder"]
     C --> D
-    D --> E["Stage 3<br/>TIGER SFT<br/>T5-small encoder–decoder"]
+    D --> E["Stage 3<br/>TIGER SFT<br/>T5-small encoder-decoder"]
     E --> F["SFT checkpoint"]
     F --> G["Stage 5<br/>OneRec-lite + DPO"]
     F -. frozen reference .-> G
@@ -73,21 +73,20 @@ independently for debugging.
 ### Colab (recommended)
 
 1. Click the badge at the top of this README.
-2. `Runtime → Change runtime type → T4 GPU` (free) or `A100 / V100`
+2. `Runtime -> Change runtime type -> T4 GPU` (free) or `A100 / V100`
    (Colab Pro).
-3. `Runtime → Run all`.
+3. `Runtime -> Run all`.
 
 The first cell selects a preset and prints a pre-flight summary (GPU,
 free RAM/VRAM, disk space). All artefacts are mirrored to
 `Drive/MyDrive/tiger-dpo-recsys-runs/<preset>-<timestamp>/` so a runtime
 disconnect does not lose progress.
 
-### Local (CPU smoke test only)
+### Local / remote GPU (workstation, lab box, cloud VM)
 
-For environments without a GPU, the `local_smoke` preset runs the entire
-pipeline on a 5 000-user subset in under 30 minutes. The resulting
-metrics are not meaningful — this preset exists only to validate that
-the codebase runs end-to-end on a given machine.
+A local CUDA GPU works exactly the same as Colab — every module already
+falls back gracefully via `torch.cuda.is_available()`, and `fp16` is
+auto-disabled on CPU/MPS. The recommended workflow is:
 
 ```bash
 git clone https://github.com/MasterpieceXu/Tiger-dpo-recsys.git
@@ -97,15 +96,89 @@ python -m venv .venv
 source .venv/bin/activate           # Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
+# CUDA torch is not on PyPI by default. Install it from the official index:
+pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
 mkdir -p dataset && cd dataset
 curl -LO https://files.grouplens.org/datasets/movielens/ml-32m.zip
 unzip ml-32m.zip && cd ..
 
+# 1) Pre-flight: prints torch / CUDA / GPU / VRAM / disk / dataset
+#    and recommends a preset for your hardware.
+python scripts/check_env.py
+
+# 2) Train. `local_gpu` auto-picks a preset based on your GPU's VRAM.
+python scripts/run_pipeline.py --preset local_gpu
+```
+
+The `local_gpu` meta-preset dispatches to one of the named presets:
+
+| Detected VRAM | Resolves to        | Notes                                              |
+| :-----------: | ------------------ | -------------------------------------------------- |
+|     no GPU    | `local_smoke`      | CPU smoke test, ~30 min, metrics not meaningful    |
+|    8-12 GB    | `local_smoke`      | RTX 3060/3070/4060 laptop, RTX 4060 Ti 8 GB        |
+|    12-22 GB   | `free_colab_safe`  | RTX 3060 12GB / 4070 / 4060 Ti 16GB / T4           |
+|     >= 22 GB  | `pro_colab_full`   | RTX 3090 / 4090 / A5000 / A100 / H100              |
+
+You can always override by passing the named preset directly
+(`--preset free_colab_safe`, `--preset pro_colab_full`, ...). Stage 0 of
+the pipeline re-runs the same hardware checks and refuses to continue if
+the CUDA stack is broken or the dataset is missing.
+
+#### Verified end-to-end run (RTX 4060 Laptop, 8 GB VRAM)
+
+The pipeline has been smoke-tested on Windows 11 + Python 3.11 +
+`torch==2.5.1+cu121` with `local_gpu` -> `local_smoke`. Wall-clock for the
+full 6 stages on `local_smoke` (top-2000 most active users, 1 epoch
+TIGER, 3 epochs multi-item SFT, fp16):
+
+| Stage | What it does                                  | Time      |
+| :---: | --------------------------------------------- | --------- |
+|   0   | env + CUDA matmul smoke test                  | ~ 1 sec   |
+|   1   | preprocessing + RQ-VAE (3 epochs, ~85 it/s)   | ~ 2.5 min |
+|   2   | sequence generator                            | ~ 30 sec  |
+|   3   | TIGER SFT (10k steps, fp16 ~10 it/s)          | ~ 22 min  |
+|   4   | offline eval (TIGER + ItemKNN + Pop + Random) | ~ 50 sec  |
+|   5   | OneRec-lite multi-item SFT (~14k steps)       | ~ 38 min  |
+|   6   | render REPORT.md                              | ~ 1 sec   |
+
+Total: ~65 minutes.
+
+Note that on `local_smoke` the **numbers in `REPORT.md` are essentially
+zero** for every model (the preset is sized for the pipeline to run
+end-to-end on a 5k-user-class subset, not for the trained policy to
+actually generalise). This is by design — the smoke preset exists to
+verify your environment and code paths. Use `free_colab_safe` or
+`pro_colab_full` for meaningful results.
+
+The DPO step also degenerates on this preset: with only one TIGER epoch
+the policy collapses, so beam search cannot produce enough distinct
+*rejected* items to form preference pairs. The pipeline detects this and
+gracefully skips DPO instead of crashing — see the
+`onerec_lite.train_complete_pipeline` fallback. With `free_colab_safe`
+or larger this no longer happens.
+
+#### Multi-GPU / specific device
+
+The codebase is single-GPU. To pin to a specific card on a multi-GPU box,
+use the standard `CUDA_VISIBLE_DEVICES`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python scripts/run_pipeline.py --preset local_gpu
+```
+
+#### CPU-only smoke test
+
+If you do not have any GPU and just want to validate that the codebase
+runs end-to-end:
+
+```bash
 python scripts/run_pipeline.py --preset local_smoke
 ```
 
-GPU training is intended to run on Colab; no local CUDA setup
-instructions are provided.
+This trains on 5 000 users in under 30 minutes. The resulting metrics
+are **not meaningful** — use it only as an integration test before
+launching a real run.
 
 ---
 
@@ -138,11 +211,11 @@ Hyper-parameters are centralised in `config.py`. Three presets are
 provided through `apply_preset` and can be selected via the `--preset`
 CLI flag or the `GR_PRESET` environment variable.
 
-| Preset             | Users | TIGER epochs | TIGER batch (×accum) | DPO epochs | Test users | Wall-clock              |
+| Preset             | Users | TIGER epochs | TIGER batch (xaccum) | DPO epochs | Test users | Wall-clock              |
 | ------------------ | :---: | :----------: | :------------------: | :--------: | :--------: | ----------------------- |
-| `local_smoke`      |   5k  |       1      |       8 (×1)         |     1      |    500     | < 30 min, CPU friendly  |
-| `free_colab_safe`  | 150k  |       3      |      16 (×2)         |     2      |   5 000    | ~3–4 h on Colab T4      |
-| `pro_colab_full`   |  all  |       5      |      24 (×2)         |     3      |  10 000    | ~8–10 h on Colab Pro    |
+| `local_smoke`      |   5k  |       1      |       8 (x1)         |     1      |    500     | < 30 min, CPU friendly  |
+| `free_colab_safe`  | 150k  |       3      |      16 (x2)         |     2      |   5 000    | ~3-4 h on Colab T4      |
+| `pro_colab_full`   |  all  |       5      |      24 (x2)         |     3      |  10 000    | ~8-10 h on Colab Pro    |
 
 A separate `default` preset preserves the upstream paper-style settings
 (full dataset, no user cap, batch size 32) and is used when no preset is
@@ -176,40 +249,44 @@ The report contains:
 
 ### DPO objective
 
-For a preference pair `(prompt, chosen, rejected)`, let
-$\pi_\theta$ denote the policy model and $\pi_{\text{ref}}$ a frozen
-copy of the SFT model. With sequence log-probabilities
+For a preference pair `(prompt, chosen, rejected)`, the policy model
+`π_θ` and a frozen copy `π_ref` (the SFT checkpoint) score the chosen
+continuation `y_w` and the rejected continuation `y_l`. The sequence
+log-probability is the sum of per-token log-probs:
 
-$$
-\log\pi(y \mid x) = \sum_{t} \log p(y_t \mid y_{\lt t}, x),
-$$
+```
+log π(y | x) = Σ_t log p(y_t | y_<t, x)
+```
 
-the loss optimised in `src/dpo.py` is
+The loss optimised in `src/dpo.py` is
 
-$$
-\mathcal{L}_{\text{DPO}} = -\mathbb{E}\bigl[\log\sigma\bigl(
-\beta\,(\log\pi_\theta(y_w \mid x) - \log\pi_{\text{ref}}(y_w \mid x))
-- \beta\,(\log\pi_\theta(y_l \mid x) - \log\pi_{\text{ref}}(y_l \mid x))
-\bigr)\bigr],
-$$
+```
+L_DPO = - E[ log σ( β · (log π_θ(y_w | x) - log π_ref(y_w | x))
+                  - β · (log π_θ(y_l | x) - log π_ref(y_l | x)) ) ]
+```
 
-with $\beta = 0.1$ by default. Padding tokens are masked using `-100`
-labels so they do not contribute to the per-sample log-probability sum.
-Only the policy path retains gradients; the reference path runs under
+with `β = 0.1` by default. Padding tokens are masked using `-100` labels
+so they do not contribute to the per-sample log-probability sum. Only the
+policy path retains gradients; the reference path runs under
 `torch.no_grad()`.
 
 Per-batch diagnostics (`reward_chosen`, `reward_rejected`,
 `reward_margin`, `accuracy = P(margin > 0)`) are logged to
 `outputs/dpo_metrics.json` for the report generator to render.
 
+> The formulas above are intentionally written as plain text instead of
+> LaTeX `$$...$$` blocks so they render identically on GitHub, on PyPI,
+> in VS Code's default Markdown preview, and in any other viewer that
+> does not ship a math renderer.
+
 ### ItemKNN at scale
 
-The dense item × item cosine-similarity matrix used by traditional
-ItemKNN scales as `O(I²)` and exceeds 30 GB on MovieLens-32M
-(≈ 87 000 items). The implementation in `src/evaluation.py` instead
-builds a sparse `csr_matrix` of user–item interactions and uses
+The dense item-by-item cosine-similarity matrix used by traditional
+ItemKNN scales as `O(I^2)` and exceeds 30 GB on MovieLens-32M
+(~ 87 000 items). The implementation in `src/evaluation.py` instead
+builds a sparse `csr_matrix` of user-item interactions and uses
 `sklearn.neighbors.NearestNeighbors` to retrieve the top-N nearest
-neighbours per item, reducing the storage to `O(I × N)` ≈ 30 MB at
+neighbours per item, reducing the storage to `O(I * N)` ~ 30 MB at
 `N = 50`.
 
 ---
@@ -236,7 +313,9 @@ Tiger-dpo-recsys/
 │   ├── evaluation.py            # Stage 4 (TIGER variants + baselines)
 │   └── report.py                # Stage 6 (Markdown rendering)
 ├── scripts/
-│   └── run_pipeline.py          # single entry point for all stages
+│   ├── run_pipeline.py          # single entry point for all stages
+│   ├── check_env.py             # standalone environment / GPU pre-flight
+│   └── demo.py                  # interactive recommendation demo
 ├── notebooks/
 │   └── colab_train.ipynb        # Colab one-click training notebook
 ├── dataset/ml-32m/              # data (gitignored)
@@ -249,11 +328,11 @@ Tiger-dpo-recsys/
 
 ## Requirements
 
-- **Python 3.11**. Versions ≤ 3.10 lack typing features used in the code,
+- **Python 3.11**. Versions <= 3.10 lack typing features used in the code,
   and 3.13 has no official `sentencepiece` wheel at the time of writing.
 - **PyTorch 2.5**. The pipeline auto-detects CUDA and disables `fp16`
   on CPU-only environments.
-- **Transformers ≥ 4.41, < 4.46**. Newer versions have removed the
+- **Transformers >= 4.41, < 4.46**. Newer versions have removed the
   `evaluation_strategy` keyword argument used by the trainer.
 - The first run downloads `t5-small` (~250 MB) from the Hugging Face Hub.
 

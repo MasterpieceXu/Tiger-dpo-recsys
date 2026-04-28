@@ -76,18 +76,21 @@ class ResidualQuantizer(nn.Module):
             total_loss: total quantization loss
             all_indices: list of [B] indices for each level
         """
+        # NOTE: use *out-of-place* ops below. ``residual = x`` is just a
+        # name binding, so ``residual -= q`` would mutate the encoder
+        # output in-place and break autograd on PyTorch >= 2.4.
         residual = x
         quantized = torch.zeros_like(x)
         total_loss = 0
         all_indices = []
-        
+
         for quantizer in self.quantizers:
             q, loss, indices = quantizer(residual)
-            quantized += q
-            residual -= q
-            total_loss += loss
+            quantized = quantized + q
+            residual = residual - q
+            total_loss = total_loss + loss
             all_indices.append(indices)
-        
+
         return quantized, total_loss, all_indices
 
 class RQVAE(nn.Module):
